@@ -1,0 +1,203 @@
+# Rebases the HDR ImGui patch (branch hdr-imgui-overlay) onto the newest
+# praydog/REFramework nightly, builds dinput8.dll and publishes it as a prerelease.
+# Build steps are ported from praydog/REFramework .github/workflows/dev-release.yml.
+name: HDR Nightly
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild and replace the release even if it already exists"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hdr-nightly
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: praydog/REFramework
+  NIGHTLY: praydog/REFramework-nightly
+  PATCH_BRANCH: hdr-imgui-overlay
+  TARGET_BRANCH: hdr-nightly
+  BUILD_TYPE: Release
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.nightly.outputs.tag }}
+      number: ${{ steps.nightly.outputs.number }}
+      upstream_sha: ${{ steps.nightly.outputs.sha }}
+      head_sha: ${{ steps.rebase.outputs.head_sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.PATCH_BRANCH }}
+          fetch-depth: 0
+
+      - name: Find newest upstream nightly
+        id: nightly
+        run: |
+          set -euo pipefail
+          source=nightly
+          tag_name=$(gh api "repos/$NIGHTLY/releases/latest" --jq .tag_name || true)
+          if [[ "$tag_name" =~ ^nightly-([0-9]+)-([0-9a-f]{40})$ ]] \
+             && gh api "repos/$UPSTREAM/commits/${BASH_REMATCH[2]}" --jq .sha >/dev/null 2>&1; then
+            number=${BASH_REMATCH[1]}
+            sha=${BASH_REMATCH[2]}
+          else
+            source=master-head
+            number=head
+            sha=$(gh api "repos/$UPSTREAM/commits/master" --jq .sha)
+          fi
+          tag="nightly-$number-$sha"
+          {
+            echo "number=$number"
+            echo "sha=$sha"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$source" = nightly ]; then
+            echo "Upstream nightly $number, commit \`$sha\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Fallback.** Could not read a nightly tag from $NIGHTLY (latest tag was \`${tag_name:-none}\`). Using $UPSTREAM master HEAD \`$sha\`." >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Nightly tag unreadable, using upstream master HEAD $sha"
+          fi
+
+      - name: Skip if already released
+        id: exists
+        run: |
+          if [ "${{ inputs.force }}" != true ] && gh release view "${{ steps.nightly.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Release \`${{ steps.nightly.outputs.tag }}\` already exists. Nothing to do." >> "$GITHUB_STEP_SUMMARY"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase patch onto nightly commit
+        id: rebase
+        if: steps.exists.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          sha=${{ steps.nightly.outputs.sha }}
+          git config user.name cerroverb
+          git config user.email 84094990+cerroverb@users.noreply.github.com
+          git remote add upstream "https://github.com/$UPSTREAM.git"
+          git fetch --no-tags upstream master
+          git fetch --no-tags upstream "$sha"
+
+          base=$(git merge-base "origin/$PATCH_BRANCH" "$sha")
+          count=$(git rev-list --count "$base..origin/$PATCH_BRANCH")
+          git checkout -q -b rebased "origin/$PATCH_BRANCH"
+          if ! git rebase --onto "$sha" "$base" 2>rebase.err; then
+            files=$(git diff --name-only --diff-filter=U)
+            git rebase --abort
+            {
+              echo "### Rebase conflict"
+              echo "Patch commits from \`$PATCH_BRANCH\` do not apply on \`$sha\`. Nothing was pushed."
+              echo "Conflicting files"
+              echo '```'
+              echo "$files"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=Rebase conflict::$PATCH_BRANCH does not apply on $sha. Conflicting files, $(echo $files)"
+            exit 1
+          fi
+          head=$(git rev-parse HEAD)
+
+          if git ls-remote --exit-code --heads origin "$TARGET_BRANCH" >/dev/null; then
+            git fetch --no-tags origin "$TARGET_BRANCH"
+            old=$(git rev-parse "origin/$TARGET_BRANCH")
+            if [ "$(git rev-parse "$old~$count" 2>/dev/null || true)" = "$sha" ] && git diff --quiet "$old" HEAD; then
+              head=$old
+              echo "$TARGET_BRANCH already holds the patch on \`$sha\`. Not pushed." >> "$GITHUB_STEP_SUMMARY"
+            else
+              git push --force-with-lease="$TARGET_BRANCH:$old" origin "HEAD:refs/heads/$TARGET_BRANCH"
+              echo "Pushed \`$head\` to $TARGET_BRANCH (was \`$old\`)." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            git push origin "HEAD:refs/heads/$TARGET_BRANCH"
+            echo "Created $TARGET_BRANCH at \`$head\`." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "head_sha=$head" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.head_sha != ''
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.head_sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Configure CMake
+        run: cmake -S ${{github.workspace}} -B ${{github.workspace}}/build -G "Visual Studio 18 2026" -A x64 -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DDEVELOPER_MODE=ON "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+
+      - name: Build
+        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --target REFramework
+
+      - name: Check output
+        shell: bash
+        run: test -s build/bin/REFramework/dinput8.dll
+
+      - name: Upload dinput8.dll
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1
+        with:
+          name: dinput8
+          path: ${{github.workspace}}/build/bin/REFramework/dinput8.dll
+          if-no-files-found: error
+
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download dinput8.dll
+        uses: actions/download-artifact@c850b930e6ba138125429b7e5c93fc707a7f8427
+        with:
+          name: dinput8
+          path: out
+
+      - name: Publish prerelease
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          NUMBER: ${{ needs.prepare.outputs.number }}
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream_sha }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          cd out
+          sha256sum dinput8.dll > dinput8.dll.sha256
+          cat dinput8.dll.sha256
+          printf '%s\n' \
+            "dinput8.dll built from REFramework nightly $NUMBER (praydog/REFramework@${UPSTREAM_SHA:0:12}) with the HDR ImGui menu patch from praydog/REFramework#1879." \
+            "" \
+            "Source commit ${HEAD_SHA:0:12} on branch $TARGET_BRANCH. Only dinput8.dll is included. SHA256 is in dinput8.dll.sha256." \
+            > notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --cleanup-tag --yes
+          fi
+          gh release create "$TAG" dinput8.dll dinput8.dll.sha256 \
+            --prerelease --target "$HEAD_SHA" \
+            --title "REFramework HDR $NUMBER (${UPSTREAM_SHA:0:12})" \
+            --notes-file notes.md
+          {
+            echo "Released \`$TAG\`."
+            echo '```'
+            cat dinput8.dll.sha256
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
