@@ -28,6 +28,8 @@ env:
   PATCH_BRANCH: hdr-patches
   TARGET_BRANCH: hdr-nightly
   BUILD_TYPE: Release
+  # GitHub replaces spaces in asset names with dots.
+  ZIP_NAME: RE.framework.HDR.zip
 
 jobs:
   prepare:
@@ -81,7 +83,9 @@ jobs:
         id: exists
         run: |
           patch_sha=$(git rev-parse "origin/$PATCH_BRANCH")
-          if [ "${{ inputs.force }}" != true ] && gh release view "${{ steps.nightly.outputs.tag }}" --json body --jq .body 2>/dev/null | grep -q "$patch_sha"; then
+          if [ "${{ inputs.force }}" != true ] \
+             && gh release view "${{ steps.nightly.outputs.tag }}" --json body --jq .body 2>/dev/null | grep -q "$patch_sha" \
+             && gh release view "${{ steps.nightly.outputs.tag }}" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx "$ZIP_NAME"; then
             echo "Release \`${{ steps.nightly.outputs.tag }}\` already has patch \`$patch_sha\`. Nothing to do." >> "$GITHUB_STEP_SUMMARY"
             echo "exists=true" >> "$GITHUB_OUTPUT"
           fi
@@ -188,25 +192,28 @@ jobs:
         run: |
           set -euo pipefail
           cd out
-          sha256sum dinput8.dll > dinput8.dll.sha256
-          cat dinput8.dll.sha256
+          # Same contents as REFramework.zip in praydog/REFramework-nightly.
+          printf '%s\r\n' "$HEAD_SHA" > reframework_revision.txt
+          zip -X "$ZIP_NAME" dinput8.dll reframework_revision.txt
+          sha256sum "$ZIP_NAME" > "$ZIP_NAME.sha256"
+          cat "$ZIP_NAME.sha256"
           printf '%s\n' \
-            "dinput8.dll built from REFramework nightly $NUMBER (praydog/REFramework@${UPSTREAM_SHA:0:12}) with the HDR ImGui menu patch from praydog/REFramework#1879." \
+            "Built from REFramework nightly $NUMBER (praydog/REFramework@${UPSTREAM_SHA:0:12}) with the HDR ImGui menu patch from praydog/REFramework#1879." \
             "" \
-            "Source commit ${HEAD_SHA:0:12} on branch $TARGET_BRANCH. Only dinput8.dll is included. SHA256 is in dinput8.dll.sha256." \
+            "Source commit ${HEAD_SHA:0:12} on branch $TARGET_BRANCH. SHA256 of the zip is in $ZIP_NAME.sha256." \
             "" \
             "Patch $PATCH_SHA" \
             > notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release delete "$TAG" --cleanup-tag --yes
           fi
-          gh release create "$TAG" dinput8.dll dinput8.dll.sha256 \
+          gh release create "$TAG" "$ZIP_NAME#RE framework HDR.zip" "$ZIP_NAME.sha256" \
             --prerelease --target "$HEAD_SHA" \
             --title "REFramework HDR $NUMBER (${UPSTREAM_SHA:0:12})" \
             --notes-file notes.md
           {
             echo "Released \`$TAG\`."
             echo '```'
-            cat dinput8.dll.sha256
+            cat "$ZIP_NAME.sha256"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
