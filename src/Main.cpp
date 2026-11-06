@@ -9,6 +9,7 @@
 
 #include <sdk/GameIdentity.hpp>
 #include <safetyhook/allocator.hpp>
+#include <spdlog/spdlog.h>
 
 // minhook, used for AllocateBuffer
 extern "C" {
@@ -96,7 +97,13 @@ void startup_thread(HMODULE reframework_module) {
     // The call is idempotent, but the authoritative init is the DllMain one.
 
     if (load_dinput8()) {
-        g_framework = std::make_unique<REFramework>(reframework_module);
+        try {
+            g_framework = std::make_unique<REFramework>(reframework_module);
+        } catch (const std::exception& e) {
+            // An exception leaving this thread terminates the game. Run the game without REFramework instead.
+            spdlog::error("REFramework startup failed: {}", e.what());
+            return;
+        }
 
         const auto our_dll = utility::get_module_within(&load_dinput8);
         const auto& gi = sdk::GameIdentity::get();
