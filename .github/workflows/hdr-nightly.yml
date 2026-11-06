@@ -1,8 +1,11 @@
-# Rebases the HDR ImGui patch (branch hdr-imgui-overlay) onto the newest
+# Rebases the HDR patches (branch hdr-patches, hdr-imgui-overlay plus fork-only fixes) onto the newest
 # praydog/REFramework nightly, builds dinput8.dll and publishes it as a prerelease.
 # Build steps are ported from praydog/REFramework .github/workflows/dev-release.yml.
 name: HDR Nightly
 on:
+  push:
+    branches: [master]
+    paths: [.github/workflows/hdr-nightly.yml]
   schedule:
     - cron: "17 * * * *"
   workflow_dispatch:
@@ -22,7 +25,7 @@ concurrency:
 env:
   UPSTREAM: praydog/REFramework
   NIGHTLY: praydog/REFramework-nightly
-  PATCH_BRANCH: hdr-imgui-overlay
+  PATCH_BRANCH: hdr-patches
   TARGET_BRANCH: hdr-nightly
   BUILD_TYPE: Release
 
@@ -36,6 +39,7 @@ jobs:
       number: ${{ steps.nightly.outputs.number }}
       upstream_sha: ${{ steps.nightly.outputs.sha }}
       head_sha: ${{ steps.rebase.outputs.head_sha }}
+      patch_sha: ${{ steps.rebase.outputs.patch_sha }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -76,8 +80,9 @@ jobs:
       - name: Skip if already released
         id: exists
         run: |
-          if [ "${{ inputs.force }}" != true ] && gh release view "${{ steps.nightly.outputs.tag }}" >/dev/null 2>&1; then
-            echo "Release \`${{ steps.nightly.outputs.tag }}\` already exists. Nothing to do." >> "$GITHUB_STEP_SUMMARY"
+          patch_sha=$(git rev-parse "origin/$PATCH_BRANCH")
+          if [ "${{ inputs.force }}" != true ] && gh release view "${{ steps.nightly.outputs.tag }}" --json body --jq .body 2>/dev/null | grep -q "$patch_sha"; then
+            echo "Release \`${{ steps.nightly.outputs.tag }}\` already has patch \`$patch_sha\`. Nothing to do." >> "$GITHUB_STEP_SUMMARY"
             echo "exists=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -127,6 +132,7 @@ jobs:
             echo "Created $TARGET_BRANCH at \`$head\`." >> "$GITHUB_STEP_SUMMARY"
           fi
           echo "head_sha=$head" >> "$GITHUB_OUTPUT"
+          echo "patch_sha=$(git rev-parse "origin/$PATCH_BRANCH")" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare
@@ -178,6 +184,7 @@ jobs:
           NUMBER: ${{ needs.prepare.outputs.number }}
           UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream_sha }}
           HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+          PATCH_SHA: ${{ needs.prepare.outputs.patch_sha }}
         run: |
           set -euo pipefail
           cd out
@@ -187,6 +194,8 @@ jobs:
             "dinput8.dll built from REFramework nightly $NUMBER (praydog/REFramework@${UPSTREAM_SHA:0:12}) with the HDR ImGui menu patch from praydog/REFramework#1879." \
             "" \
             "Source commit ${HEAD_SHA:0:12} on branch $TARGET_BRANCH. Only dinput8.dll is included. SHA256 is in dinput8.dll.sha256." \
+            "" \
+            "Patch $PATCH_SHA" \
             > notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release delete "$TAG" --cleanup-tag --yes
