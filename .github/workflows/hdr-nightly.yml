@@ -52,6 +52,25 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.HDR_PUSH_TOKEN || github.token }}
 
+      - name: Check push token
+        env:
+          PAT: ${{ secrets.HDR_PUSH_TOKEN }}
+        run: |
+          if [ -z "$PAT" ]; then
+            echo "::warning::HDR_PUSH_TOKEN is not set. Pushes use GITHUB_TOKEN and fail when upstream changes workflow files."
+            exit 0
+          fi
+          headers=$(curl -sS -o /dev/null -D - -H "Authorization: token $PAT" https://api.github.com/user | tr -d '\r')
+          status=$(echo "$headers" | awk 'NR==1{print $2}')
+          scopes=$(echo "$headers" | sed -n 's/^[Xx]-[Oo][Aa]uth-[Ss]copes: //p')
+          expires=$(echo "$headers" | sed -n 's/^[Gg]ithub-[Aa]uthentication-[Tt]oken-[Ee]xpiration: //p')
+          echo "HDR_PUSH_TOKEN HTTP \`$status\`, scopes \`${scopes:-none}\`, expires \`${expires:-never}\`." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" != 200 ]; then
+            echo "::warning::HDR_PUSH_TOKEN was rejected by GitHub (HTTP $status). Replace the secret."
+          elif ! echo "$scopes" | grep -qw workflow; then
+            echo "::warning::HDR_PUSH_TOKEN lacks the workflow scope."
+          fi
+
       - name: Find newest upstream nightly
         id: nightly
         run: |
