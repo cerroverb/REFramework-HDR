@@ -50,6 +50,7 @@ jobs:
         with:
           ref: ${{ env.PATCH_BRANCH }}
           fetch-depth: 0
+          token: ${{ secrets.HDR_PUSH_TOKEN || github.token }}
 
       - name: Find newest upstream nightly
         id: nightly
