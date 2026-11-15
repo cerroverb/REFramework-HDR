@@ -33,7 +33,7 @@ env:
 
 jobs:
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     outputs:
@@ -46,7 +46,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout fork
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ env.PATCH_BRANCH }}
           fetch-depth: 0
@@ -164,7 +164,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ needs.prepare.outputs.head_sha }}
           submodules: recursive
@@ -181,7 +181,7 @@ jobs:
         run: test -s build/bin/REFramework/dinput8.dll
 
       - name: Upload dinput8.dll
-        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: dinput8
           path: ${{github.workspace}}/build/bin/REFramework/dinput8.dll
@@ -189,7 +189,7 @@ jobs:
 
   release:
     needs: [prepare, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
@@ -197,7 +197,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
     steps:
       - name: Download dinput8.dll
-        uses: actions/download-artifact@c850b930e6ba138125429b7e5c93fc707a7f8427
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: dinput8
           path: out
