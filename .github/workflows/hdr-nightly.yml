@@ -27,7 +27,6 @@ env:
   NIGHTLY: praydog/REFramework-nightly
   PATCH_BRANCH: hdr-patches
   TARGET_BRANCH: hdr-nightly
-  BUILD_TYPE: Release
   # GitHub replaces spaces in asset names with dots.
   ZIP_NAME: RE.framework.HDR.zip
 
@@ -40,10 +39,11 @@ jobs:
       tag: ${{ steps.nightly.outputs.tag }}
       number: ${{ steps.nightly.outputs.number }}
       upstream_sha: ${{ steps.nightly.outputs.sha }}
-      head_sha: ${{ steps.rebase.outputs.head_sha }}
-      patch_sha: ${{ steps.rebase.outputs.patch_sha }}
+      head_sha: ${{ steps.push.outputs.head_sha }}
+      patch_sha: ${{ steps.push.outputs.patch_sha }}
     env:
       GH_TOKEN: ${{ github.token }}
+      HAS_CLAUDE: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     steps:
       - name: Check push token
         id: pat
@@ -129,20 +129,52 @@ jobs:
           base=$(git merge-base "origin/$PATCH_BRANCH" "$sha")
           count=$(git rev-list --count "$base..origin/$PATCH_BRANCH")
           git checkout -q -b rebased "origin/$PATCH_BRANCH"
+          echo "PATCH_COUNT=$count" >> "$GITHUB_ENV"
           if ! git rebase --onto "$sha" "$base" 2>rebase.err; then
-            files=$(git diff --name-only --diff-filter=U)
             git rebase --abort
-            {
-              echo "### Rebase conflict"
-              echo "Patch commits from \`$PATCH_BRANCH\` do not apply on \`$sha\`. Nothing was pushed."
-              echo "Conflicting files"
-              echo '```'
-              echo "$files"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error title=Rebase conflict::$PATCH_BRANCH does not apply on $sha. Conflicting files, $(echo $files)"
-            exit 1
+            # The patch commits as one diff, merged 3-way: what conflicts goes to Claude Code (next step).
+            git checkout -q -B rebased "$sha"
+            git diff --binary "$base" "origin/$PATCH_BRANCH" > "$RUNNER_TEMP/patch.diff"
+            git apply --3way "$RUNNER_TEMP/patch.diff" || true
+            files=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+            [ -n "$files" ] || { echo "::error title=Rebase conflict::$PATCH_BRANCH does not apply on $sha, even as one 3-way diff"; exit 1; }
+            echo "PATCH_COUNT=1" >> "$GITHUB_ENV"
+            echo "files=$files" >> "$GITHUB_OUTPUT"
+            echo "Patch commits from \`$PATCH_BRANCH\` conflict on \`$sha\` in $files. Applied as one diff." >> "$GITHUB_STEP_SUMMARY"
+            [ "$HAS_CLAUDE" = true ] || { echo "::error title=Rebase conflict::conflicts in $files and no CLAUDE_CODE_OAUTH_TOKEN"; exit 1; }
           fi
+
+      - name: Resolve the conflicts (Claude Code)
+        if: steps.rebase.outputs.files != ''
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: |
+            This repository is a fork of praydog/REFramework. The HDR patch commits of branch ${{ env.PATCH_BRANCH }} (the HDR ImGui overlay of praydog/REFramework#1879 plus fork-only fixes) were applied as one 3-way diff onto upstream commit ${{ steps.nightly.outputs.sha }} and conflict in: ${{ steps.rebase.outputs.files }}
+            Resolve only those conflicts with the Edit tool. Keep every change of the HDR patch and every upstream change: read both sides with git log and git show (origin/${{ env.PATCH_BRANCH }} and upstream) to learn why each exists. If upstream restructured the code, carry the patch's change over into the new structure. Add no new behaviour, and change nothing outside the conflicts. Keep each file's line endings exactly (some files use CRLF). Remove all conflict markers. Do not stage or commit. If a conflict cannot be resolved with confidence, leave its markers in place and say why.
+          claude_args: >-
+            --allowedTools "Read,Edit,Grep,Glob,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*),Bash(git blame:*)"
+            --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(git add:*),Bash(curl:*),Bash(gh:*)"
+
+      - name: Check and commit the resolved patch
+        if: steps.rebase.outputs.files != ''
+        env:
+          FILES: ${{ steps.rebase.outputs.files }}
+        run: |
+          set -euo pipefail
+          left=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+          [ "$left" = "$FILES" ] || { echo "::error::Unexpected files in conflict: $left"; exit 1; }
+          if grep -nE '^(<<<<<<<|=======$|>>>>>>>)' $FILES; then echo "::error::Conflict markers left"; exit 1; fi
+          git add $FILES && git commit -q -m "HDR patches of $(git rev-parse --short "origin/$PATCH_BRANCH") on ${{ steps.nightly.outputs.sha }}"
+
+      - name: Push to ${{ env.TARGET_BRANCH }}
+        id: push
+        if: steps.exists.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          sha=${{ steps.nightly.outputs.sha }}
+          count=$PATCH_COUNT
           head=$(git rev-parse HEAD)
 
           if git ls-remote --exit-code --heads origin "$TARGET_BRANCH" >/dev/null; then
@@ -165,34 +197,80 @@ jobs:
   build:
     needs: prepare
     if: needs.prepare.outputs.head_sha != ''
-    runs-on: windows-latest
+    uses: ./.github/workflows/hdr-build.yml
+    with:
+      ref: ${{ needs.prepare.outputs.head_sha }}
+
+  # A failed build goes to Claude Code once: the fix is pushed to the target branch and built again.
+  repair:
+    needs: [prepare, build]
+    if: failure() && needs.prepare.outputs.head_sha != '' && needs.build.result == 'failure'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      head_sha: ${{ steps.commit.outputs.head_sha }}
+    env:
+      HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+      HAS_CLAUDE: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     steps:
+      - name: Claude Code
+        run: '[ "$HAS_CLAUDE" = true ] || { echo "::error::The build failed and there is no CLAUDE_CODE_OAUTH_TOKEN to repair it"; exit 1; }'
+
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ needs.prepare.outputs.head_sha }}
-          submodules: recursive
-          persist-credentials: false
+          ref: ${{ env.HEAD_SHA }}
+          fetch-depth: 0
 
-      - name: Configure CMake
-        run: cmake -S ${{github.workspace}} -B ${{github.workspace}}/build -G "Visual Studio 18 2026" -A x64 -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DDEVELOPER_MODE=ON "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+      - name: The failed build's log
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --jq '[.jobs[] | select(.conclusion == "failure")][0].id')
+          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" > .build-error.log
+          tail -n 40 .build-error.log
 
-      - name: Build
-        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --target REFramework
-
-      - name: Check output
-        shell: bash
-        run: test -s build/bin/REFramework/dinput8.dll
-
-      - name: Upload dinput8.dll
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+      - name: Repair the build (Claude Code)
+        uses: anthropics/claude-code-action@v1
         with:
-          name: dinput8
-          path: ${{github.workspace}}/build/bin/REFramework/dinput8.dll
-          if-no-files-found: error
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: |
+            This repository is a fork of praydog/REFramework. HEAD is upstream commit ${{ needs.prepare.outputs.upstream_sha }} with the HDR patch commits of branch ${{ env.PATCH_BRANCH }} on top (the HDR ImGui overlay of praydog/REFramework#1879 plus fork-only fixes), and its Windows build (MSVC, target REFramework) failed. The build log is in .build-error.log: read its end first.
+            Find the cause and fix it with the smallest change. Most likely upstream changed something the patch uses: carry the patch's change over to upstream's new code, the way upstream's own code now does it. Read both sides with git log, git show and git grep. Change only source files, never .github/ or dependencies/. Add no new behaviour and change nothing unrelated to the error. Keep each file's line endings exactly (some files use CRLF). Do not stage or commit. If the cause is outside the repository (the runner, a download) or not clear, change nothing and say why.
+          claude_args: >-
+            --allowedTools "Read,Edit,Grep,Glob,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git grep:*),Bash(git status:*),Bash(git blame:*)"
+            --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(git add:*),Bash(curl:*),Bash(gh:*)"
+
+      - name: Check, commit and push the repair
+        id: commit
+        run: |
+          set -euo pipefail
+          rm -f .build-error.log
+          changed=$(git diff --name-only --ignore-submodules=all)
+          [ -n "$changed" ] || { echo "::error::The build failed and was not repaired (see the build job)"; exit 1; }
+          echo "repaired: $changed"
+          if echo "$changed" | grep -qE '^(\.github|dependencies)/'; then echo "::error::The repair changed protected files"; exit 1; fi
+          git diff
+          git config user.name cerroverb
+          git config user.email 84094990+cerroverb@users.noreply.github.com
+          git commit -qam "Repair the build on ${{ needs.prepare.outputs.upstream_sha }}"
+          git push -q --force-with-lease="$TARGET_BRANCH:$HEAD_SHA" origin "HEAD:refs/heads/$TARGET_BRANCH"
+          echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Build repaired in: $changed" >> "$GITHUB_STEP_SUMMARY"
+
+  rebuild:
+    needs: [prepare, repair]
+    if: always() && needs.repair.result == 'success'
+    uses: ./.github/workflows/hdr-build.yml
+    with:
+      ref: ${{ needs.repair.outputs.head_sha }}
 
   release:
-    needs: [prepare, build]
+    needs: [prepare, build, repair, rebuild]
+    if: always() && needs.prepare.outputs.head_sha != '' && (needs.build.result == 'success' || needs.rebuild.result == 'success')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -211,7 +289,7 @@ jobs:
           TAG: ${{ needs.prepare.outputs.tag }}
           NUMBER: ${{ needs.prepare.outputs.number }}
           UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream_sha }}
-          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+          HEAD_SHA: ${{ needs.repair.outputs.head_sha || needs.prepare.outputs.head_sha }}
           PATCH_SHA: ${{ needs.prepare.outputs.patch_sha }}
         run: |
           set -euo pipefail

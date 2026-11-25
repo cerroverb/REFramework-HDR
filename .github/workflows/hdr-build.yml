@@ -1,0 +1,43 @@
+# The Windows build of the HDR nightly (hdr-nightly.yml), called once for the rebased patch and once more after a repair.
+# Build steps are ported from praydog/REFramework .github/workflows/dev-release.yml.
+name: HDR build
+on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Configure CMake
+        run: cmake -S ${{github.workspace}} -B ${{github.workspace}}/build -G "Visual Studio 18 2026" -A x64 -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DDEVELOPER_MODE=ON "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+
+      - name: Build
+        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --target REFramework
+
+      - name: Check output
+        shell: bash
+        run: test -s build/bin/REFramework/dinput8.dll
+
+      - name: Upload dinput8.dll
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: dinput8
+          path: ${{github.workspace}}/build/bin/REFramework/dinput8.dll
+          if-no-files-found: error
