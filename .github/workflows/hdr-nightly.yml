@@ -44,6 +44,11 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       HAS_CLAUDE: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+      # (commits after a Claude Code step are cerroverb's: the action leaves its own git identity behind)
+      GIT_AUTHOR_NAME: cerroverb
+      GIT_AUTHOR_EMAIL: 84094990+cerroverb@users.noreply.github.com
+      GIT_COMMITTER_NAME: cerroverb
+      GIT_COMMITTER_EMAIL: 84094990+cerroverb@users.noreply.github.com
     steps:
       - name: Check push token
         id: pat
@@ -214,6 +219,11 @@ jobs:
     env:
       HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
       HAS_CLAUDE: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+      # (commits after a Claude Code step are cerroverb's: the action leaves its own git identity behind)
+      GIT_AUTHOR_NAME: cerroverb
+      GIT_AUTHOR_EMAIL: 84094990+cerroverb@users.noreply.github.com
+      GIT_COMMITTER_NAME: cerroverb
+      GIT_COMMITTER_EMAIL: 84094990+cerroverb@users.noreply.github.com
     steps:
       - name: Claude Code
         run: '[ "$HAS_CLAUDE" = true ] || { echo "::error::The build failed and there is no CLAUDE_CODE_OAUTH_TOKEN to repair it"; exit 1; }'
